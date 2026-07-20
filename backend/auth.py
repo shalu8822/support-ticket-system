@@ -12,6 +12,8 @@ from database import get_db
 from security import decode_access_token
 import models
 
+__all__ = ["get_current_user", "require_admin"]
+
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
 
 CREDENTIALS_EXCEPTION = HTTPException(
@@ -39,7 +41,8 @@ def get_current_user(
 
 
 def require_admin(current_user: models.User = Depends(get_current_user)) -> models.User:
-    if current_user.role != models.RoleEnum.admin:
+    user_role = getattr(current_user, 'role')  # type: models.RoleEnum
+    if user_role != models.RoleEnum.admin:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="This action requires admin (support agent) privileges.",

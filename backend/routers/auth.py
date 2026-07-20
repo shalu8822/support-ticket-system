@@ -27,12 +27,21 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     user's email in the `username` field.
     """
     user = crud.get_user_by_email(db, form_data.username)
-    if not user or not verify_password(form_data.password, user.password):
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    user_password = getattr(user, 'password')  # type: str
+    if not verify_password(form_data.password, user_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password.",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    token = create_access_token(data={"sub": str(user.id), "role": user.role.value})
-    return schemas.Token(access_token=token, role=user.role)
+    user_id = getattr(user, 'id')  # type: int
+    user_role = getattr(user, 'role')  # type: models.RoleEnum
+    token = create_access_token(data={"sub": str(user_id), "role": user_role.value})
+    return schemas.Token(access_token=token, role=user_role)

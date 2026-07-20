@@ -181,4 +181,10 @@ async function loadUsers() {
   }
 }
 
-loadOverview().catch((err) => showToast(err.message, "danger"));
+(async () => {
+  try {
+    await loadOverview();
+  } catch (err) {
+    showToast(err.message, "danger");
+  }
+})();

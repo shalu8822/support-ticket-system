@@ -31,13 +31,13 @@ class UserOut(BaseModel):
 
     id: int
     name: str
-    email: EmailStr
+    email: str
     role: RoleEnum
     created_at: datetime
 
 
 class UserLogin(BaseModel):
-    email: EmailStr
+    email: str
     password: str
 
 

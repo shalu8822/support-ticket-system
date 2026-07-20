@@ -8,7 +8,7 @@ import crud
 import schemas
 import models
 from database import get_db
-from auth import require_admin
+from auth import require_admin  # type: ignore
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
@@ -44,10 +44,13 @@ def update_ticket(
     updated = crud.admin_update_ticket(db, ticket, ticket_update)
 
     if ticket_update.status is not None and ticket_update.status != old_status:
+        user_id = getattr(updated, 'user_id')  # type: int
+        ticket_id_val = getattr(updated, 'id')  # type: int
+        status_msg = f"Your ticket #{ticket_id_val} ('{updated.subject}') status changed to {updated.status.value}."
         crud.create_notification(
-            db, updated.user_id,
-            f"Your ticket #{updated.id} ('{updated.subject}') status changed to {updated.status.value}.",
-            ticket_id=updated.id,
+            db, user_id,
+            status_msg,
+            ticket_id=ticket_id_val,
         )
 
     return updated
@@ -79,27 +82,34 @@ def delete_user(
     user_id: int,
     _admin: models.User = Depends(require_admin),
     db: Session = Depends(get_db),
-):
+) -> None:
     user = crud.get_user(db, user_id)
-    if not user or user.role == models.RoleEnum.admin:
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
+    user_role = getattr(user, 'role')  # type: models.RoleEnum
+    if user_role == models.RoleEnum.admin:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
     crud.delete_user(db, user)
 
 
-@router.put("/users/{user_id}/reset-password")
+@router.put("/users/{uid}/reset-password")
 def reset_password(
-    user_id: int,
+    uid: int,
     _admin: models.User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     """Generates and sets a temporary password for the user (returned once)."""
-    user = crud.get_user(db, user_id)
-    if not user or user.role == models.RoleEnum.admin:
+    user = crud.get_user(db, uid)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
+    user_role = getattr(user, 'role')  # type: models.RoleEnum
+    if user_role == models.RoleEnum.admin:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
 
     temp_password = secrets.token_urlsafe(9)
     crud.reset_user_password(db, user, temp_password)
-    return {"user_id": user.id, "temporary_password": temp_password}
+    user_id = getattr(user, 'id')  # type: int
+    return {"user_id": user_id, "temporary_password": temp_password}
 
 
 # ------------------------------------------------------------ Analytics ----

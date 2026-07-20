@@ -15,12 +15,18 @@ def is_allowed_file(filename: str) -> bool:
 
 
 def save_upload(file: UploadFile) -> tuple[str, str]:
-    """Saves an UploadFile under a random name; returns (stored_name, original_name)."""
+    """Save uploaded file and return (stored_name, original_name)."""
+
+    if not file.filename:
+        raise ValueError("Filename is missing.")
+
     ext = file.filename.rsplit(".", 1)[1].lower()
+
     stored_name = f"{uuid.uuid4().hex}.{ext}"
     destination = os.path.join(UPLOAD_DIR, stored_name)
 
     contents = file.file.read()
+
     if len(contents) > MAX_UPLOAD_BYTES:
         raise ValueError("File exceeds the 5 MB upload limit.")
 
@@ -28,3 +34,18 @@ def save_upload(file: UploadFile) -> tuple[str, str]:
         out_file.write(contents)
 
     return stored_name, file.filename
+
+# def save_upload(file: UploadFile) -> tuple[str, str]:
+#     """Saves an UploadFile under a random name; returns (stored_name, original_name)."""
+#     ext = file.filename.rsplit(".", 1)[1].lower()
+#     stored_name = f"{uuid.uuid4().hex}.{ext}"
+#     destination = os.path.join(UPLOAD_DIR, stored_name)
+
+#     contents = file.file.read()
+#     if len(contents) > MAX_UPLOAD_BYTES:
+#         raise ValueError("File exceeds the 5 MB upload limit.")
+
+#     with open(destination, "wb") as out_file:
+#         out_file.write(contents)
+
+#     return stored_name, file.filename

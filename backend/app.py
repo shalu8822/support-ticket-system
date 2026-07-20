@@ -65,3 +65,9 @@ def on_startup():
 @app.get("/", tags=["Health"])
 def health_check():
     return {"status": "ok", "service": "customer-support-ticket-system"}
+
+if __name__ == "__main__":
+    import uvicorn
+    Base.metadata.create_all(bind=engine)
+    seed_admin()
+    uvicorn.run(app, host="127.0.0.1", port=8000)

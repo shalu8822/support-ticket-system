@@ -48,7 +48,7 @@ def delete_user(db: Session, user: models.User) -> None:
 
 
 def reset_user_password(db: Session, user: models.User, new_password: str) -> None:
-    user.password = hash_password(new_password)
+    user.password = hash_password(new_password)  # type: ignore
     db.commit()
 
 
@@ -117,7 +117,7 @@ def update_ticket_fields(db: Session, ticket: models.Ticket, ticket_update: sche
     data = ticket_update.model_dump(exclude_unset=True)
     for field, value in data.items():
         setattr(ticket, field, value)
-    ticket.updated_at = datetime.utcnow()
+    ticket.updated_at = datetime.utcnow()  # type: ignore
     db.commit()
     db.refresh(ticket)
     return _decorate_ticket(ticket)
@@ -127,7 +127,7 @@ def admin_update_ticket(db: Session, ticket: models.Ticket, admin_update: schema
     data = admin_update.model_dump(exclude_unset=True)
     for field, value in data.items():
         setattr(ticket, field, value)
-    ticket.updated_at = datetime.utcnow()
+    ticket.updated_at = datetime.utcnow()  # type: ignore
     db.commit()
     db.refresh(ticket)
     return _decorate_ticket(ticket)
@@ -184,7 +184,7 @@ def list_notifications_for_user(db: Session, user_id: int):
 
 
 def mark_notification_read(db: Session, notification: models.Notification) -> models.Notification:
-    notification.is_read = True
+    notification.is_read = True  # type: ignore
     db.commit()
     db.refresh(notification)
     return notification
@@ -197,11 +197,11 @@ def get_analytics(db: Session) -> dict:
 
     status_counts = dict(
         db.query(models.Ticket.status, func.count(models.Ticket.id))
-        .group_by(models.Ticket.status).all()
+        .group_by(models.Ticket.status).all()  # type: ignore
     )
     priority_counts = dict(
         db.query(models.Ticket.priority, func.count(models.Ticket.id))
-        .group_by(models.Ticket.priority).all()
+        .group_by(models.Ticket.priority).all()  # type: ignore
     )
 
     monthly_raw = (
@@ -232,8 +232,8 @@ def get_analytics(db: Session) -> dict:
     return {
         "total_tickets": total_tickets,
         "total_users": total_users,
-        "status_counts": {k.value if hasattr(k, "value") else k: v for k, v in status_counts.items()},
-        "priority_counts": {k.value if hasattr(k, "value") else k: v for k, v in priority_counts.items()},
+        "status_counts": {k.value if hasattr(k, "value") else k: v for k, v in status_counts.items()},  # type: ignore
+        "priority_counts": {k.value if hasattr(k, "value") else k: v for k, v in priority_counts.items()},  # type: ignore
         "tickets_per_month": tickets_per_month,
         "most_active_users": most_active_users,
     }

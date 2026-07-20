@@ -7,7 +7,7 @@ import crud
 import schemas
 import models
 from database import get_db
-from auth import get_current_user
+from auth import get_current_user  # type: ignore
 
 router = APIRouter(tags=["Users"])
 
@@ -22,7 +22,8 @@ def get_notifications(
     current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)
 ):
     """Notifications fire whenever one of the user's tickets changes status."""
-    return crud.list_notifications_for_user(db, current_user.id)
+    user_id = getattr(current_user, 'id')  # type: int
+    return crud.list_notifications_for_user(db, user_id)
 
 
 @router.put("/notifications/{notification_id}/read", response_model=schemas.NotificationOut)
@@ -32,6 +33,10 @@ def read_notification(
     db: Session = Depends(get_db),
 ):
     note = db.query(models.Notification).filter(models.Notification.id == notification_id).first()
-    if not note or note.user_id != current_user.id:
+    current_user_id = getattr(current_user, 'id')  # type: int
+    if note is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notification not found.")
+    note_user_id = getattr(note, 'user_id')  # type: int
+    if note_user_id != current_user_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notification not found.")
     return crud.mark_notification_read(db, note)

@@ -38,6 +38,10 @@ const Auth = {
  * @param {object} options     { method, body, isForm, params }
  */
 async function apiFetch(path, options = {}) {
+  if (!Auth.isLoggedIn() && path !== "/login" && path !== "/register") {
+    Auth.logout();
+    return;
+  }
   const { method = "GET", body, isForm = false, params } = options;
 
   let url = `${API_BASE}${path}`;

@@ -7,14 +7,17 @@ import crud
 import schemas
 import models
 from database import get_db
-from auth import get_current_user
-from utils import is_allowed_file, save_upload
+from auth import get_current_user  # type: ignore
+from utils import is_allowed_file, save_upload #type: ignore
 
 router = APIRouter(prefix="/tickets", tags=["Tickets"])
 
 
-def _ensure_owner_or_admin(ticket: models.Ticket, current_user: models.User):
-    if ticket.user_id != current_user.id and current_user.role != models.RoleEnum.admin:
+def _ensure_owner_or_admin(ticket: models.Ticket, current_user: models.User) -> None:
+    ticket_user_id = getattr(ticket, 'user_id')  # type: int
+    current_user_id = getattr(current_user, 'id')  # type: int
+    user_role = getattr(current_user, 'role')  # type: models.RoleEnum
+    if ticket_user_id != current_user_id and user_role != models.RoleEnum.admin:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
                              detail="You don't have access to this ticket.")
 
@@ -38,7 +41,8 @@ def create_ticket(
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
     ticket_in = schemas.TicketCreate(subject=subject, description=description, priority=priority)
-    return crud.create_ticket(db, current_user.id, ticket_in, stored_filename, original_filename)
+    user_id = getattr(current_user, 'id')  # type: int
+    return crud.create_ticket(db, user_id, ticket_in, stored_filename, original_filename)
 
 
 @router.get("", response_model=List[schemas.TicketOut])
@@ -46,7 +50,8 @@ def list_my_tickets(
     current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)
 ):
     """Returns only the logged-in customer's own tickets."""
-    return crud.list_tickets_for_user(db, current_user.id)
+    user_id = getattr(current_user, 'id')  # type: int
+    return crud.list_tickets_for_user(db, user_id)
 
 
 @router.get("/{ticket_id}", response_model=schemas.TicketOut)
@@ -72,9 +77,12 @@ def update_ticket(
     ticket = crud.get_ticket(db, ticket_id)
     if not ticket:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ticket not found.")
-    if ticket.user_id != current_user.id:
+    ticket_user_id = getattr(ticket, 'user_id')  # type: int
+    current_user_id = getattr(current_user, 'id')  # type: int
+    if ticket_user_id != current_user_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only edit your own tickets.")
-    if ticket.status != models.StatusEnum.open:
+    ticket_status = getattr(ticket, 'status')  # type: models.StatusEnum
+    if ticket_status != models.StatusEnum.open:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="This ticket can no longer be edited because it's no longer Open.",
@@ -91,7 +99,9 @@ def delete_ticket(
     ticket = crud.get_ticket(db, ticket_id)
     if not ticket:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ticket not found.")
-    if ticket.user_id != current_user.id:
+    ticket_user_id = getattr(ticket, 'user_id')  # type: int
+    current_user_id = getattr(current_user, 'id')  # type: int
+    if ticket_user_id != current_user_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only delete your own tickets.")
     crud.delete_ticket(db, ticket)
 
@@ -110,10 +120,12 @@ def add_comment(
     _ensure_owner_or_admin(ticket, current_user)
 
     # Only admins (support agents) may post internal-only notes.
-    if comment_in.is_internal and current_user.role != models.RoleEnum.admin:
+    user_role = getattr(current_user, 'role')  # type: models.RoleEnum
+    if comment_in.is_internal and user_role != models.RoleEnum.admin:
         comment_in.is_internal = False
 
-    return crud.create_comment(db, ticket_id, current_user.id, comment_in)
+    user_id = getattr(current_user, 'id')  # type: int
+    return crud.create_comment(db, ticket_id, user_id, comment_in)
 
 
 @router.get("/{ticket_id}/comments", response_model=List[schemas.CommentOut])
@@ -127,5 +139,6 @@ def get_comments(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ticket not found.")
     _ensure_owner_or_admin(ticket, current_user)
 
-    include_internal = current_user.role == models.RoleEnum.admin
+    user_role = getattr(current_user, 'role')  # type: models.RoleEnum
+    include_internal = user_role == models.RoleEnum.admin
     return crud.list_comments_for_ticket(db, ticket_id, include_internal)
