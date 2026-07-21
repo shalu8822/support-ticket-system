@@ -3,24 +3,37 @@ Data-access helpers. Routers call these instead of touching the ORM
 directly, so query logic stays in one place and is easy to unit test.
 """
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Optional, List, Any, Dict, cast
 
-from sqlalchemy import func, extract,Column
+from sqlalchemy import func, extract
 from sqlalchemy.orm import Session
 
 import models
 import schemas
 from security import hash_password
-import json
+from audit import record_audit, snapshot
+
+TICKET_AUDIT_FIELDS = [
+    "subject", "description", "priority", "status", "assigned_to", "deleted_at",
+]
+USER_AUDIT_FIELDS = ["name", "email", "role", "deleted_at"]
 
 
 # --------------------------------------------------------------- Users -----
 def get_user_by_email(db: Session, email: str) -> Optional[models.User]:
-    return db.query(models.User).filter(models.User.email == email.lower()).first()
+    return (
+        db.query(models.User)
+        .filter(models.User.email == email.lower(), models.User.deleted_at.is_(None))
+        .first()
+    )
 
 
 def get_user(db: Session, user_id: int) -> Optional[models.User]:
-    return db.query(models.User).filter(models.User.id == user_id).first()
+    return (
+        db.query(models.User)
+        .filter(models.User.id == user_id, models.User.deleted_at.is_(None))
+        .first()
+    )
 
 
 def create_user(db: Session, user_in: schemas.UserCreate, role: models.RoleEnum = models.RoleEnum.user) -> models.User:
@@ -33,87 +46,85 @@ def create_user(db: Session, user_in: schemas.UserCreate, role: models.RoleEnum 
     db.add(user)
     db.commit()
     db.refresh(user)
+    
+    # Pylance Fix: Cast ID to int
+    u_id = cast(int, user.id)
+    record_audit(db, actor=user, entity_type="user", entity_id=u_id, action="create",
+                 new_values=snapshot(user, USER_AUDIT_FIELDS))
     return user
 
 
 def list_users(db: Session, role: Optional[models.RoleEnum] = None):
-    query = db.query(models.User)
+    query = db.query(models.User).filter(models.User.deleted_at.is_(None))
     if role is not None:
         query = query.filter(models.User.role == role)
     return query.order_by(models.User.created_at.desc()).all()
 
 
-def delete_user(db: Session, user: models.User) -> None:
-    db.delete(user)
+def delete_user(db: Session, user: models.User, actor: models.User) -> None:
+    """Soft delete: the row stays for audit/compliance, just marked inactive."""
+    old = snapshot(user, USER_AUDIT_FIELDS)
+    
+    # Pylance Fix: Standard assignment works, but cast helps readability
+    user.deleted_at = datetime.utcnow() # type: ignore
     db.commit()
+    
+    u_id = cast(int, user.id)
+    record_audit(db, actor=actor, entity_type="user", entity_id=u_id, action="delete",
+                 old_values=old, new_values=snapshot(user, USER_AUDIT_FIELDS))
 
 
-def reset_user_password(db: Session, user: models.User, new_password: str) -> None:
-    user.password = hash_password(new_password)  # type: ignore
+def reset_user_password(db: Session, user: models.User, new_password: str, actor: models.User) -> None:
+    user.password = hash_password(new_password) # type: ignore
     db.commit()
+    
+    u_id = cast(int, user.id)
+    record_audit(db, actor=actor, entity_type="user", entity_id=u_id, action="update",
+                 old_values={"password": "***"}, new_values={"password": "*** (reset)"})
 
 
 # ------------------------------------------------------------- Tickets -----
 def _decorate_ticket(ticket: models.Ticket) -> models.Ticket:
     """Attaches display-friendly names the response model expects."""
-    ticket.customer_name = ticket.customer.name if ticket.customer else None
-    ticket.agent_name = ticket.agent.name if ticket.agent else None
+    ticket.customer_name = ticket.customer.name if ticket.customer else None # type: ignore
+    ticket.agent_name = ticket.agent.name if ticket.agent else None # type: ignore
     return ticket
 
 
-# def create_ticket(db: Session, user_id: int, ticket_in: schemas.TicketCreate,
-#                    attachment_filename: Optional[str] = None,
-#                    original_filename: Optional[str] = None) -> models.Ticket:
-#     ticket = models.Ticket(
-#         user_id=user_id,
-#         subject=ticket_in.subject,
-#         description=ticket_in.description,
-#         priority=ticket_in.priority,
-#         attachment_filename=attachment_filename,
-#         original_filename=original_filename,
-#     )
-#     db.add(ticket)
-#     db.commit()
-#     db.refresh(ticket)
-#     return _decorate_ticket(ticket)
-
-def create_ticket(db: Session, user_id: int, ticket_in: schemas.TicketCreate, **kwargs: Any) -> models.Ticket:
-    ticket = models.Ticket(user_id=user_id, **ticket_in.model_dump(), **kwargs)
+def create_ticket(db: Session, user_id: int, ticket_in: schemas.TicketCreate,
+                   attachment_filename: Optional[str] = None,
+                   original_filename: Optional[str] = None) -> models.Ticket:
+    ticket = models.Ticket(
+        user_id=user_id,
+        subject=ticket_in.subject,
+        description=ticket_in.description,
+        priority=ticket_in.priority,
+        attachment_filename=attachment_filename,
+        original_filename=original_filename,
+    )
     db.add(ticket)
     db.commit()
     db.refresh(ticket)
     
-    # Use int() to satisfy the type checker
-    ticket_id = int(ticket.id) # type: ignore
-    create_audit_log(db, ticket_id, user_id, "CREATED", {"new": ticket_in.model_dump()})
+    actor = get_user(db, user_id)
+    t_id = cast(int, ticket.id)
+    record_audit(db, actor=actor, entity_type="ticket", entity_id=t_id, action="create",
+                 new_values=snapshot(ticket, TICKET_AUDIT_FIELDS))
     return _decorate_ticket(ticket)
 
-def create_audit_log(db: Session, ticket_id: int, user_id: int, action: str, changes: Optional[Dict[str, Any]] = None):
-    log = models.AuditLog(
-        ticket_id=ticket_id,
-        performed_by=user_id,
-        action=action,
-        changes=changes
-    )
-    db.add(log)
-    db.commit()
 
-
-# def get_ticket(db: Session, ticket_id: int) -> Optional[models.Ticket]:
-#     ticket = db.query(models.Ticket).filter(models.Ticket.id == ticket_id).first()
-#     return _decorate_ticket(ticket) if ticket else None
-
-def get_ticket(db: Session, ticket_id: int) -> Optional[models.Ticket]:
-    ticket = db.query(models.Ticket).filter(
-        models.Ticket.id == ticket_id, 
-        models.Ticket.deleted_at == None  # Don't show deleted tickets
-    ).first()
+def get_ticket(db: Session, ticket_id: int, include_deleted: bool = False) -> Optional[models.Ticket]:
+    query = db.query(models.Ticket).filter(models.Ticket.id == ticket_id)
+    if not include_deleted:
+        query = query.filter(models.Ticket.deleted_at.is_(None))
+    ticket = query.first()
     return _decorate_ticket(ticket) if ticket else None
+
 
 def list_tickets_for_user(db: Session, user_id: int):
     tickets = (
         db.query(models.Ticket)
-        .filter(models.Ticket.user_id == user_id)
+        .filter(models.Ticket.user_id == user_id, models.Ticket.deleted_at.is_(None))
         .order_by(models.Ticket.created_at.desc())
         .all()
     )
@@ -122,7 +133,7 @@ def list_tickets_for_user(db: Session, user_id: int):
 
 def list_all_tickets(db: Session, status: Optional[str] = None, priority: Optional[str] = None,
                       customer_id: Optional[int] = None, search: Optional[str] = None):
-    query = db.query(models.Ticket).filter(models.Ticket.deleted_at == None)
+    query = db.query(models.Ticket).filter(models.Ticket.deleted_at.is_(None))
     if status:
         query = query.filter(models.Ticket.status == status)
     if priority:
@@ -141,66 +152,50 @@ def list_all_tickets(db: Session, status: Optional[str] = None, priority: Option
     return [_decorate_ticket(t) for t in tickets]
 
 
-# def update_ticket_fields(db: Session, ticket: models.Ticket, ticket_update: schemas.TicketUpdate) -> models.Ticket:
-#     data = ticket_update.model_dump(exclude_unset=True)
-#     for field, value in data.items():
-#         setattr(ticket, field, value)
-#     ticket.updated_at = datetime.utcnow()  # type: ignore
-#     db.commit()
-#     db.refresh(ticket)
-#     return _decorate_ticket(ticket)
-
-def update_ticket_fields(db: Session, ticket: models.Ticket, ticket_update: schemas.TicketUpdate, user_id: int) -> models.Ticket:
-    old_data = {"subject": str(ticket.subject), "description": str(ticket.description)}
-    new_data = ticket_update.model_dump(exclude_unset=True)
-    
-    for field, value in new_data.items():
+def update_ticket_fields(db: Session, ticket: models.Ticket, ticket_update: schemas.TicketUpdate,
+                          actor: models.User) -> models.Ticket:
+    old = snapshot(ticket, TICKET_AUDIT_FIELDS)
+    data = ticket_update.model_dump(exclude_unset=True)
+    for field, value in data.items():
         setattr(ticket, field, value)
     
+    ticket.updated_at = datetime.utcnow() # type: ignore
     db.commit()
-    ticket_id = int(ticket.id) # type: ignore
-    create_audit_log(db, ticket_id, user_id, "UPDATED", {"old": old_data, "new": new_data})
+    db.refresh(ticket)
+    
+    t_id = cast(int, ticket.id)
+    record_audit(db, actor=actor, entity_type="ticket", entity_id=t_id, action="update",
+                 old_values=old, new_values=snapshot(ticket, TICKET_AUDIT_FIELDS))
     return _decorate_ticket(ticket)
 
 
-# def admin_update_ticket(db: Session, ticket: models.Ticket, admin_update: schemas.TicketAdminUpdate) -> models.Ticket:
-#     data = admin_update.model_dump(exclude_unset=True)
-#     for field, value in data.items():
-#         setattr(ticket, field, value)
-#     ticket.updated_at = datetime.utcnow()  # type: ignore
-#     db.commit()
-#     db.refresh(ticket)
-#     return _decorate_ticket(ticket)
-
-def admin_update_ticket(db: Session, ticket: models.Ticket, admin_update: schemas.TicketAdminUpdate, admin_id: int) -> models.Ticket:
-    old_data = {"status": str(ticket.status), "priority": str(ticket.priority)}
-    new_data = admin_update.model_dump(exclude_unset=True)
-    
-    for field, value in new_data.items():
+def admin_update_ticket(db: Session, ticket: models.Ticket, admin_update: schemas.TicketAdminUpdate,
+                         actor: models.User) -> models.Ticket:
+    old = snapshot(ticket, TICKET_AUDIT_FIELDS)
+    data = admin_update.model_dump(exclude_unset=True)
+    for field, value in data.items():
         setattr(ticket, field, value)
-        
+    
+    ticket.updated_at = datetime.utcnow() # type: ignore
     db.commit()
-    ticket_id = int(ticket.id) # type: ignore
-    create_audit_log(db, ticket_id, admin_id, "ADMIN_UPDATE", {"old": old_data, "new": new_data})
+    db.refresh(ticket)
+    
+    t_id = cast(int, ticket.id)
+    record_audit(db, actor=actor, entity_type="ticket", entity_id=t_id, action="update",
+                 old_values=old, new_values=snapshot(ticket, TICKET_AUDIT_FIELDS))
     return _decorate_ticket(ticket)
 
-# def delete_ticket(db: Session, ticket: models.Ticket) -> None:
-#     db.delete(ticket)
-#     db.commit()
-def delete_ticket(db: Session, ticket: models.Ticket, user_id: int) -> None:
-    # Use setattr to avoid "Cannot assign to attribute" error
-    setattr(ticket, "deleted_at", datetime.utcnow())
-    ticket_id = int(ticket.id) # type: ignore
-    create_audit_log(db, ticket_id, user_id, "SOFT_DELETED")
+
+def delete_ticket(db: Session, ticket: models.Ticket, actor: models.User) -> None:
+    """Soft delete: sets deleted_at instead of removing the row."""
+    old = snapshot(ticket, TICKET_AUDIT_FIELDS)
+    ticket.deleted_at = datetime.utcnow() # type: ignore
     db.commit()
+    
+    t_id = cast(int, ticket.id)
+    record_audit(db, actor=actor, entity_type="ticket", entity_id=t_id, action="delete",
+                 old_values=old, new_values=snapshot(ticket, TICKET_AUDIT_FIELDS))
 
-def get_ticket_including_deleted(db: Session, ticket_id: int) -> Optional[models.Ticket]:
-    # Notice we REMOVED the 'deleted_at == None' filter here
-    ticket = db.query(models.Ticket).filter(models.Ticket.id == ticket_id).first()
-    return _decorate_ticket(ticket) if ticket else None
-
-def get_ticket_history(db: Session, ticket_id: int):
-    return db.query(models.AuditLog).filter(models.AuditLog.ticket_id == ticket_id).order_by(models.AuditLog.timestamp.desc()).all()
 
 # ------------------------------------------------------------ Comments -----
 def create_comment(db: Session, ticket_id: int, user_id: int, comment_in: schemas.CommentCreate) -> models.Comment:
@@ -213,8 +208,9 @@ def create_comment(db: Session, ticket_id: int, user_id: int, comment_in: schema
     db.add(comment)
     db.commit()
     db.refresh(comment)
-    comment.author_name = comment.author.name
-    comment.author_role = comment.author.role
+    
+    comment.author_name = comment.author.name # type: ignore
+    comment.author_role = comment.author.role # type: ignore
     return comment
 
 
@@ -224,8 +220,8 @@ def list_comments_for_ticket(db: Session, ticket_id: int, include_internal: bool
         query = query.filter(models.Comment.is_internal.is_(False))
     comments = query.order_by(models.Comment.created_at.asc()).all()
     for c in comments:
-        c.author_name = c.author.name
-        c.author_role = c.author.role
+        c.author_name = c.author.name # type: ignore
+        c.author_role = c.author.role # type: ignore
     return comments
 
 
@@ -248,7 +244,7 @@ def list_notifications_for_user(db: Session, user_id: int):
 
 
 def mark_notification_read(db: Session, notification: models.Notification) -> models.Notification:
-    notification.is_read = True  # type: ignore
+    notification.is_read = True # type: ignore
     db.commit()
     db.refresh(notification)
     return notification
@@ -256,17 +252,27 @@ def mark_notification_read(db: Session, notification: models.Notification) -> mo
 
 # --------------------------------------------------------------- Admin -----
 def get_analytics(db: Session) -> dict:
-    total_tickets = db.query(models.Ticket).count()
-    total_users = db.query(models.User).filter(models.User.role == models.RoleEnum.user).count()
+    total_tickets = db.query(models.Ticket).filter(models.Ticket.deleted_at.is_(None)).count()
+    total_users = (
+        db.query(models.User)
+        .filter(models.User.role == models.RoleEnum.user, models.User.deleted_at.is_(None))
+        .count()
+    )
 
-    status_counts = dict(
+    # Pylance Fix: Explicitly process Rows into a dictionary
+    status_rows = (
         db.query(models.Ticket.status, func.count(models.Ticket.id))
-        .group_by(models.Ticket.status).all()  # type: ignore
+        .filter(models.Ticket.deleted_at.is_(None))
+        .group_by(models.Ticket.status).all()
     )
-    priority_counts = dict(
+    status_counts = {str(row[0].value if hasattr(row[0], 'value') else row[0]): row[1] for row in status_rows}
+
+    priority_rows = (
         db.query(models.Ticket.priority, func.count(models.Ticket.id))
-        .group_by(models.Ticket.priority).all()  # type: ignore
+        .filter(models.Ticket.deleted_at.is_(None))
+        .group_by(models.Ticket.priority).all()
     )
+    priority_counts = {str(row[0].value if hasattr(row[0], 'value') else row[0]): row[1] for row in priority_rows}
 
     monthly_raw = (
         db.query(
@@ -274,6 +280,7 @@ def get_analytics(db: Session) -> dict:
             extract("month", models.Ticket.created_at).label("month"),
             func.count(models.Ticket.id).label("count"),
         )
+        .filter(models.Ticket.deleted_at.is_(None))
         .group_by("year", "month")
         .order_by("year", "month")
         .all()
@@ -286,6 +293,7 @@ def get_analytics(db: Session) -> dict:
     active_raw = (
         db.query(models.User.name, func.count(models.Ticket.id).label("count"))
         .join(models.Ticket, models.Ticket.user_id == models.User.id)
+        .filter(models.Ticket.deleted_at.is_(None))
         .group_by(models.User.id)
         .order_by(func.count(models.Ticket.id).desc())
         .limit(5)
@@ -296,11 +304,22 @@ def get_analytics(db: Session) -> dict:
     return {
         "total_tickets": total_tickets,
         "total_users": total_users,
-        "status_counts": {k.value if hasattr(k, "value") else k: v for k, v in status_counts.items()},  # type: ignore
-        "priority_counts": {k.value if hasattr(k, "value") else k: v for k, v in priority_counts.items()},  # type: ignore
+        "status_counts": status_counts,
+        "priority_counts": priority_counts,
         "tickets_per_month": tickets_per_month,
         "most_active_users": most_active_users,
     }
 
 
-# --------------------------------------------------------------- sudit logs -----
+# ------------------------------------------------------------ Audit Log ----
+def list_audit_logs(db: Session, entity_type: Optional[str] = None, entity_id: Optional[int] = None, limit: int = 200):
+    query = db.query(models.AuditLog)
+    if entity_type:
+        query = query.filter(models.AuditLog.entity_type == entity_type)
+    if entity_id:
+        query = query.filter(models.AuditLog.entity_id == entity_id)
+    logs = query.order_by(models.AuditLog.created_at.desc()).limit(limit).all()
+    for log in logs:
+        # Pylance Fix: Attach actor_name dynamically
+        setattr(log, 'actor_name', log.actor.name if log.actor else "system")
+    return logs

@@ -1,29 +1,42 @@
-from typing import List, Optional
+from typing import List, Optional, cast, Any
 
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, BackgroundTasks
 from sqlalchemy.orm import Session
 
 import crud
 import schemas
 import models
 from database import get_db
-from auth import get_current_user  # type: ignore
-from utils import is_allowed_file, save_upload #type: ignore
+from auth import get_current_user # type: ignore
+from utils import is_allowed_file, save_upload
+
+# Handling the potential missing slack integration gracefully
+try:
+    from integrations.slack import notify_high_priority_ticket # type: ignore
+except ImportError:
+    def notify_high_priority_ticket(*args: Any, **kwargs: Any) -> None: 
+        pass
 
 router = APIRouter(prefix="/tickets", tags=["Tickets"])
 
 
 def _ensure_owner_or_admin(ticket: models.Ticket, current_user: models.User) -> None:
-    ticket_user_id = getattr(ticket, 'user_id')  # type: int
-    current_user_id = getattr(current_user, 'id')  # type: int
-    user_role = getattr(current_user, 'role')  # type: models.RoleEnum
-    if ticket_user_id != current_user_id and user_role != models.RoleEnum.admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN,
-                             detail="You don't have access to this ticket.")
+    """Helper to ensure the user owns the ticket or is an admin."""
+    # Pylance Fix: Cast attributes to ensure valid boolean comparison
+    user_id = cast(int, current_user.id)
+    ticket_owner_id = cast(int, ticket.user_id)
+    is_admin = cast(models.RoleEnum, current_user.role) == models.RoleEnum.admin
+    
+    if ticket_owner_id != user_id and not is_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, 
+            detail="You don't have access to this ticket."
+        )
 
 
 @router.post("", response_model=schemas.TicketOut, status_code=status.HTTP_201_CREATED)
 def create_ticket(
+    background_tasks: BackgroundTasks,
     subject: str = Form(...),
     description: str = Form(...),
     priority: models.PriorityEnum = Form(models.PriorityEnum.medium),
@@ -41,8 +54,22 @@ def create_ticket(
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 
     ticket_in = schemas.TicketCreate(subject=subject, description=description, priority=priority)
-    user_id = getattr(current_user, 'id')  # type: int
-    return crud.create_ticket(db, user_id, ticket_in, attachment_filename=stored_filename, original_filename=original_filename)
+    
+    # Pylance Fix: Cast current_user.id to int
+    user_id = cast(int, current_user.id)
+    ticket = crud.create_ticket(db, user_id, ticket_in, attachment_filename=stored_filename, original_filename=original_filename)
+
+    # Pylance Fix: Cast ticket.priority for comparison
+    if cast(models.PriorityEnum, ticket.priority) == models.PriorityEnum.high:
+        background_tasks.add_task(
+            notify_high_priority_ticket,
+            cast(int, ticket.id), 
+            ticket.subject, 
+            current_user.name, 
+            current_user.email,
+        )
+
+    return ticket
 
 
 @router.get("", response_model=List[schemas.TicketOut])
@@ -50,7 +77,7 @@ def list_my_tickets(
     current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)
 ):
     """Returns only the logged-in customer's own tickets."""
-    user_id = getattr(current_user, 'id')  # type: int
+    user_id = cast(int, current_user.id)
     return crud.list_tickets_for_user(db, user_id)
 
 
@@ -63,6 +90,7 @@ def get_ticket(
     ticket = crud.get_ticket(db, ticket_id)
     if not ticket:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ticket not found.")
+    
     _ensure_owner_or_admin(ticket, current_user)
     return ticket
 
@@ -77,34 +105,21 @@ def update_ticket(
     ticket = crud.get_ticket(db, ticket_id)
     if not ticket:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ticket not found.")
-    ticket_user_id = getattr(ticket, 'user_id')  # type: int
-    current_user_id = getattr(current_user, 'id')  # type: int
-    if ticket_user_id != current_user_id:
+    
+    # Pylance Fix: Cast for comparison
+    if cast(int, ticket.user_id) != cast(int, current_user.id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only edit your own tickets.")
-    ticket_status = getattr(ticket, 'status')  # type: models.StatusEnum
-    if ticket_status != models.StatusEnum.open:
+    
+    if cast(models.StatusEnum, ticket.status) != models.StatusEnum.open:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="This ticket can no longer be edited because it's no longer Open.",
         )
-    return crud.update_ticket_fields(db, ticket, ticket_update, current_user.id) # type: ignore
-
-
-@router.get("/{ticket_id}/history", response_model=List[schemas.AuditLogResponse])
-def get_history(ticket_id: int, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
-    #ticket = crud.get_ticket(db, ticket_id)
-    ticket = crud.get_ticket_including_deleted(db, ticket_id)
-    if not ticket:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, 
-            detail="Ticket not found or has been deleted."
-        )
-    _ensure_owner_or_admin(ticket, current_user)
-    return crud.get_ticket_history(db, ticket_id)
+        
+    return crud.update_ticket_fields(db, ticket, ticket_update, actor=current_user)
 
 
 @router.delete("/{ticket_id}", status_code=status.HTTP_204_NO_CONTENT)
-
 def delete_ticket(
     ticket_id: int,
     current_user: models.User = Depends(get_current_user),
@@ -113,11 +128,12 @@ def delete_ticket(
     ticket = crud.get_ticket(db, ticket_id)
     if not ticket:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ticket not found.")
-    ticket_user_id = getattr(ticket, 'user_id')  # type: int
-    current_user_id = getattr(current_user, 'id')  # type: int
-    if ticket_user_id != current_user_id:
+    
+    # Pylance Fix: Cast for comparison
+    if cast(int, ticket.user_id) != cast(int, current_user.id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only delete your own tickets.")
-    crud.delete_ticket(db, ticket, int(current_user.id)) # type: ignore
+    
+    crud.delete_ticket(db, ticket, actor=current_user)
 
 
 # ------------------------------------------------------------- Comments ----
@@ -131,15 +147,14 @@ def add_comment(
     ticket = crud.get_ticket(db, ticket_id)
     if not ticket:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ticket not found.")
+    
     _ensure_owner_or_admin(ticket, current_user)
 
     # Only admins (support agents) may post internal-only notes.
-    user_role = getattr(current_user, 'role')  # type: models.RoleEnum
-    if comment_in.is_internal and user_role != models.RoleEnum.admin:
+    if comment_in.is_internal and cast(models.RoleEnum, current_user.role) != models.RoleEnum.admin:
         comment_in.is_internal = False
 
-    user_id = getattr(current_user, 'id')  # type: int
-    return crud.create_comment(db, ticket_id, user_id, comment_in)
+    return crud.create_comment(db, ticket_id, cast(int, current_user.id), comment_in)
 
 
 @router.get("/{ticket_id}/comments", response_model=List[schemas.CommentOut])
@@ -151,8 +166,23 @@ def get_comments(
     ticket = crud.get_ticket(db, ticket_id)
     if not ticket:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ticket not found.")
+    
     _ensure_owner_or_admin(ticket, current_user)
 
-    user_role = getattr(current_user, 'role')  # type: models.RoleEnum
-    include_internal = user_role == models.RoleEnum.admin
+    include_internal = cast(models.RoleEnum, current_user.role) == models.RoleEnum.admin
     return crud.list_comments_for_ticket(db, ticket_id, include_internal)
+
+
+@router.get("/{ticket_id}/history", response_model=List[schemas.AuditLogOut])
+def get_ticket_history(
+    ticket_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    # Allow history view even if soft-deleted
+    ticket = crud.get_ticket(db, ticket_id, include_deleted=True)
+    if not ticket:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ticket not found")
+    
+    _ensure_owner_or_admin(ticket, current_user)
+    return crud.list_audit_logs(db, entity_type="ticket", entity_id=ticket_id)

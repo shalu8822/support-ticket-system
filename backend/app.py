@@ -1,8 +1,13 @@
 import os
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from streamlit import status
+#from middleware import ObservabilityMiddleware
+#from logging_config import setup_logging
+#import logging
 
 from database import Base, engine, SessionLocal
 import models
@@ -12,11 +17,16 @@ from routers import users as users_router
 from routers import tickets as tickets_router
 from routers import admin as admin_router
 
+# Initialize professional logging
+#setup_logging()
+#logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Customer Support Ticket System API",
     description="Role-based (customer / admin) support-ticket platform built with FastAPI + JWT.",
     version="1.0.0",
 )
+# Add our Middleware
+#app.add_middleware(ObservabilityMiddleware)
 
 # CORS: in production, replace "*" with your deployed frontend's origin(s).
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
@@ -55,7 +65,31 @@ def seed_admin():
     finally:
         db.close()
 
+# UPGRADE: Global Exception Handler (The Safety Net)
+# @app.exception_handler(Exception)
+# async def global_exception_handler(request: Request, exc: Exception):
+#     request_id = request.headers.get("X-Request-ID", "N/A")
+    
+#     # Log the full error internally
+#     logger.error(
+#         f"Unhandled exception occurred: {str(exc)}", 
+#         extra={"request_id": request_id}, 
+#         exc_info=True
+#     )
+    
+#     # Return a clean, professional error to the client
+#     return JSONResponse(
+#         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, # type: ignore
+#         content={
+#             "error_code": "INTERNAL_SERVER_ERROR",
+#             "message": "An unexpected error occurred. Please contact support.",
+#             "request_id": request_id  # The user can give this ID to the admin
+#         }
+#     )
 
+@app.get("/debug-crash")
+def crash_me():
+    return 1 / 0  # This will trigger a ZeroDivisionError
 @app.on_event("startup")
 def on_startup():
     Base.metadata.create_all(bind=engine)

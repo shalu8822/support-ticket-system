@@ -2,7 +2,7 @@ import enum
 from datetime import datetime
 
 from sqlalchemy import (
-    Column, Integer, String, Text, Boolean, DateTime, JSON,ForeignKey, Enum
+    Column, Integer, String, Text, Boolean, DateTime, ForeignKey, Enum
 )
 from sqlalchemy.orm import relationship
 
@@ -35,6 +35,7 @@ class User(Base):
     password = Column(String(255), nullable=False)  # bcrypt hash
     role = Column(Enum(RoleEnum), default=RoleEnum.user, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+    deleted_at = Column(DateTime, nullable=True)  # soft delete -- NULL means "active"
 
     tickets = relationship(
         "Ticket", back_populates="customer",
@@ -42,12 +43,6 @@ class User(Base):
     )
     comments = relationship("Comment", back_populates="author", cascade="all, delete-orphan")
     notifications = relationship("Notification", back_populates="user", cascade="all, delete-orphan")
-
-
-class TicketStatus(str, enum.Enum):
-    OPEN = "open"
-    IN_PROGRESS = "in_progress"
-    RESOLVED = "resolved"
 
 
 class Ticket(Base):
@@ -64,25 +59,13 @@ class Ticket(Base):
     original_filename = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-    # UPGRADE: Soft Delete
-    deleted_at = Column(DateTime, nullable=True)
+    deleted_at = Column(DateTime, nullable=True)  # soft delete -- NULL means "active"
 
     customer = relationship("User", back_populates="tickets", foreign_keys=[user_id])
     agent = relationship("User", foreign_keys=[assigned_to])
-    comments = relationship("Comment", back_populates="ticket")
+    comments = relationship("Comment", back_populates="ticket", cascade="all, delete-orphan")
 
 
-class AuditLog(Base):
-    __tablename__ = "audit_logs"
-    id = Column(Integer, primary_key=True, index=True)
-    ticket_id = Column(Integer, ForeignKey("tickets.id"))
-    action = Column(String)  # "CREATED", "UPDATED", "SOFT_DELETED"
-    changes = Column(JSON, nullable=True) # {"old": {...}, "new": {...}}
-    performed_by = Column(Integer, ForeignKey("users.id")) 
-    timestamp = Column(DateTime, default=datetime.utcnow)
-
-    
 class Comment(Base):
     __tablename__ = "comments"
 
@@ -108,3 +91,23 @@ class Notification(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="notifications")
+
+
+class AuditLog(Base):
+    """
+    Compliance/audit trail: one row per create/update/(soft-)delete on a
+    tracked entity. Never mutated or deleted itself.
+    """
+    __tablename__ = "audit_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    actor_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # who made the change
+    actor_role = Column(String(20), nullable=True)
+    entity_type = Column(String(50), nullable=False)  # e.g. "ticket", "user"
+    entity_id = Column(Integer, nullable=False)
+    action = Column(String(20), nullable=False)  # "create" | "update" | "delete"
+    old_values = Column(Text, nullable=True)  # JSON string snapshot before the change
+    new_values = Column(Text, nullable=True)  # JSON string snapshot after the change
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    actor = relationship("User", foreign_keys=[actor_id])

@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional, List, Any, Dict
+from typing import Optional, List
 from pydantic import BaseModel, EmailStr, ConfigDict, field_validator
 
 from models import RoleEnum, PriorityEnum, StatusEnum
@@ -32,12 +32,13 @@ class UserOut(BaseModel):
     id: int
     name: str
     email: str
+   #email: EmailStr
     role: RoleEnum
     created_at: datetime
 
 
 class UserLogin(BaseModel):
-    email: str
+    email: EmailStr
     password: str
 
 
@@ -89,14 +90,6 @@ class TicketOut(BaseModel):
     agent_name: Optional[str] = None
 
 
-class AuditLogResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: int
-    action: str
-    changes: Optional[Dict[str, Any]]
-    performed_by: int
-    timestamp: datetime
-
 # ------------------------------------------------------------- Comments ----
 class CommentCreate(BaseModel):
     comment: str
@@ -135,3 +128,19 @@ class AnalyticsOut(BaseModel):
     priority_counts: dict
     tickets_per_month: List[dict]
     most_active_users: List[dict]
+
+
+# ----------------------------------------------------------- Audit Logs ----
+class AuditLogOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    actor_id: Optional[int]
+    actor_role: Optional[str]
+    entity_type: str
+    entity_id: int
+    action: str
+    old_values: Optional[str]
+    new_values: Optional[str]
+    created_at: datetime
+    actor_name: Optional[str] = None
