@@ -33,7 +33,7 @@ def list_all_tickets(
 def update_ticket(
     ticket_id: int,
     ticket_update: schemas.TicketAdminUpdate,
-    _admin: models.User = Depends(require_admin),
+    current_admin: models.User = Depends(require_admin), # Rename this for clarity
     db: Session = Depends(get_db),
 ):
     ticket = crud.get_ticket(db, ticket_id)
@@ -41,7 +41,7 @@ def update_ticket(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ticket not found.")
 
     old_status = ticket.status
-    updated = crud.admin_update_ticket(db, ticket, ticket_update)
+    updated = crud.admin_update_ticket(db, ticket, ticket_update, current_admin.id) # type: ignore
 
     if ticket_update.status is not None and ticket_update.status != old_status:
         user_id = getattr(updated, 'user_id')  # type: int
@@ -59,13 +59,14 @@ def update_ticket(
 @router.delete("/tickets/{ticket_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_ticket(
     ticket_id: int,
-    _admin: models.User = Depends(require_admin),
+    current_admin: models.User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     ticket = crud.get_ticket(db, ticket_id)
+    # ... check if ticket exists ...
     if not ticket:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ticket not found.")
-    crud.delete_ticket(db, ticket)
+    crud.delete_ticket(db, ticket, current_admin.id) # type: ignore
 
 
 # ----------------------------------------------------------------- Users ---

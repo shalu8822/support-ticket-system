@@ -3,14 +3,15 @@ Data-access helpers. Routers call these instead of touching the ORM
 directly, so query logic stays in one place and is easy to unit test.
 """
 from datetime import datetime
-from typing import Optional
+from typing import Any, Dict, Optional
 
-from sqlalchemy import func, extract
+from sqlalchemy import func, extract,Column
 from sqlalchemy.orm import Session
 
 import models
 import schemas
 from security import hash_password
+import json
 
 
 # --------------------------------------------------------------- Users -----
@@ -60,27 +61,54 @@ def _decorate_ticket(ticket: models.Ticket) -> models.Ticket:
     return ticket
 
 
-def create_ticket(db: Session, user_id: int, ticket_in: schemas.TicketCreate,
-                   attachment_filename: Optional[str] = None,
-                   original_filename: Optional[str] = None) -> models.Ticket:
-    ticket = models.Ticket(
-        user_id=user_id,
-        subject=ticket_in.subject,
-        description=ticket_in.description,
-        priority=ticket_in.priority,
-        attachment_filename=attachment_filename,
-        original_filename=original_filename,
-    )
+# def create_ticket(db: Session, user_id: int, ticket_in: schemas.TicketCreate,
+#                    attachment_filename: Optional[str] = None,
+#                    original_filename: Optional[str] = None) -> models.Ticket:
+#     ticket = models.Ticket(
+#         user_id=user_id,
+#         subject=ticket_in.subject,
+#         description=ticket_in.description,
+#         priority=ticket_in.priority,
+#         attachment_filename=attachment_filename,
+#         original_filename=original_filename,
+#     )
+#     db.add(ticket)
+#     db.commit()
+#     db.refresh(ticket)
+#     return _decorate_ticket(ticket)
+
+def create_ticket(db: Session, user_id: int, ticket_in: schemas.TicketCreate, **kwargs: Any) -> models.Ticket:
+    ticket = models.Ticket(user_id=user_id, **ticket_in.model_dump(), **kwargs)
     db.add(ticket)
     db.commit()
     db.refresh(ticket)
+    
+    # Use int() to satisfy the type checker
+    ticket_id = int(ticket.id) # type: ignore
+    create_audit_log(db, ticket_id, user_id, "CREATED", {"new": ticket_in.model_dump()})
     return _decorate_ticket(ticket)
 
+def create_audit_log(db: Session, ticket_id: int, user_id: int, action: str, changes: Optional[Dict[str, Any]] = None):
+    log = models.AuditLog(
+        ticket_id=ticket_id,
+        performed_by=user_id,
+        action=action,
+        changes=changes
+    )
+    db.add(log)
+    db.commit()
+
+
+# def get_ticket(db: Session, ticket_id: int) -> Optional[models.Ticket]:
+#     ticket = db.query(models.Ticket).filter(models.Ticket.id == ticket_id).first()
+#     return _decorate_ticket(ticket) if ticket else None
 
 def get_ticket(db: Session, ticket_id: int) -> Optional[models.Ticket]:
-    ticket = db.query(models.Ticket).filter(models.Ticket.id == ticket_id).first()
+    ticket = db.query(models.Ticket).filter(
+        models.Ticket.id == ticket_id, 
+        models.Ticket.deleted_at == None  # Don't show deleted tickets
+    ).first()
     return _decorate_ticket(ticket) if ticket else None
-
 
 def list_tickets_for_user(db: Session, user_id: int):
     tickets = (
@@ -94,7 +122,7 @@ def list_tickets_for_user(db: Session, user_id: int):
 
 def list_all_tickets(db: Session, status: Optional[str] = None, priority: Optional[str] = None,
                       customer_id: Optional[int] = None, search: Optional[str] = None):
-    query = db.query(models.Ticket)
+    query = db.query(models.Ticket).filter(models.Ticket.deleted_at == None)
     if status:
         query = query.filter(models.Ticket.status == status)
     if priority:
@@ -113,30 +141,66 @@ def list_all_tickets(db: Session, status: Optional[str] = None, priority: Option
     return [_decorate_ticket(t) for t in tickets]
 
 
-def update_ticket_fields(db: Session, ticket: models.Ticket, ticket_update: schemas.TicketUpdate) -> models.Ticket:
-    data = ticket_update.model_dump(exclude_unset=True)
-    for field, value in data.items():
+# def update_ticket_fields(db: Session, ticket: models.Ticket, ticket_update: schemas.TicketUpdate) -> models.Ticket:
+#     data = ticket_update.model_dump(exclude_unset=True)
+#     for field, value in data.items():
+#         setattr(ticket, field, value)
+#     ticket.updated_at = datetime.utcnow()  # type: ignore
+#     db.commit()
+#     db.refresh(ticket)
+#     return _decorate_ticket(ticket)
+
+def update_ticket_fields(db: Session, ticket: models.Ticket, ticket_update: schemas.TicketUpdate, user_id: int) -> models.Ticket:
+    old_data = {"subject": str(ticket.subject), "description": str(ticket.description)}
+    new_data = ticket_update.model_dump(exclude_unset=True)
+    
+    for field, value in new_data.items():
         setattr(ticket, field, value)
-    ticket.updated_at = datetime.utcnow()  # type: ignore
+    
     db.commit()
-    db.refresh(ticket)
+    ticket_id = int(ticket.id) # type: ignore
+    create_audit_log(db, ticket_id, user_id, "UPDATED", {"old": old_data, "new": new_data})
     return _decorate_ticket(ticket)
 
 
-def admin_update_ticket(db: Session, ticket: models.Ticket, admin_update: schemas.TicketAdminUpdate) -> models.Ticket:
-    data = admin_update.model_dump(exclude_unset=True)
-    for field, value in data.items():
+# def admin_update_ticket(db: Session, ticket: models.Ticket, admin_update: schemas.TicketAdminUpdate) -> models.Ticket:
+#     data = admin_update.model_dump(exclude_unset=True)
+#     for field, value in data.items():
+#         setattr(ticket, field, value)
+#     ticket.updated_at = datetime.utcnow()  # type: ignore
+#     db.commit()
+#     db.refresh(ticket)
+#     return _decorate_ticket(ticket)
+
+def admin_update_ticket(db: Session, ticket: models.Ticket, admin_update: schemas.TicketAdminUpdate, admin_id: int) -> models.Ticket:
+    old_data = {"status": str(ticket.status), "priority": str(ticket.priority)}
+    new_data = admin_update.model_dump(exclude_unset=True)
+    
+    for field, value in new_data.items():
         setattr(ticket, field, value)
-    ticket.updated_at = datetime.utcnow()  # type: ignore
+        
     db.commit()
-    db.refresh(ticket)
+    ticket_id = int(ticket.id) # type: ignore
+    create_audit_log(db, ticket_id, admin_id, "ADMIN_UPDATE", {"old": old_data, "new": new_data})
     return _decorate_ticket(ticket)
 
-
-def delete_ticket(db: Session, ticket: models.Ticket) -> None:
-    db.delete(ticket)
+# def delete_ticket(db: Session, ticket: models.Ticket) -> None:
+#     db.delete(ticket)
+#     db.commit()
+def delete_ticket(db: Session, ticket: models.Ticket, user_id: int) -> None:
+    # Use setattr to avoid "Cannot assign to attribute" error
+    setattr(ticket, "deleted_at", datetime.utcnow())
+    ticket_id = int(ticket.id) # type: ignore
+    create_audit_log(db, ticket_id, user_id, "SOFT_DELETED")
     db.commit()
 
+def get_ticket_including_deleted(db: Session, ticket_id: int) -> Optional[models.Ticket]:
+    # Notice we REMOVED the 'deleted_at == None' filter here
+    ticket = db.query(models.Ticket).filter(models.Ticket.id == ticket_id).first()
+    return _decorate_ticket(ticket) if ticket else None
+
+def get_ticket_history(db: Session, ticket_id: int):
+    return db.query(models.AuditLog).filter(models.AuditLog.ticket_id == ticket_id).order_by(models.AuditLog.timestamp.desc()).all()
 
 # ------------------------------------------------------------ Comments -----
 def create_comment(db: Session, ticket_id: int, user_id: int, comment_in: schemas.CommentCreate) -> models.Comment:
@@ -237,3 +301,6 @@ def get_analytics(db: Session) -> dict:
         "tickets_per_month": tickets_per_month,
         "most_active_users": most_active_users,
     }
+
+
+# --------------------------------------------------------------- sudit logs -----

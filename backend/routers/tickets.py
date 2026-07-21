@@ -42,7 +42,7 @@ def create_ticket(
 
     ticket_in = schemas.TicketCreate(subject=subject, description=description, priority=priority)
     user_id = getattr(current_user, 'id')  # type: int
-    return crud.create_ticket(db, user_id, ticket_in, stored_filename, original_filename)
+    return crud.create_ticket(db, user_id, ticket_in, attachment_filename=stored_filename, original_filename=original_filename)
 
 
 @router.get("", response_model=List[schemas.TicketOut])
@@ -87,10 +87,24 @@ def update_ticket(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="This ticket can no longer be edited because it's no longer Open.",
         )
-    return crud.update_ticket_fields(db, ticket, ticket_update)
+    return crud.update_ticket_fields(db, ticket, ticket_update, current_user.id) # type: ignore
+
+
+@router.get("/{ticket_id}/history", response_model=List[schemas.AuditLogResponse])
+def get_history(ticket_id: int, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    #ticket = crud.get_ticket(db, ticket_id)
+    ticket = crud.get_ticket_including_deleted(db, ticket_id)
+    if not ticket:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, 
+            detail="Ticket not found or has been deleted."
+        )
+    _ensure_owner_or_admin(ticket, current_user)
+    return crud.get_ticket_history(db, ticket_id)
 
 
 @router.delete("/{ticket_id}", status_code=status.HTTP_204_NO_CONTENT)
+
 def delete_ticket(
     ticket_id: int,
     current_user: models.User = Depends(get_current_user),
@@ -103,7 +117,7 @@ def delete_ticket(
     current_user_id = getattr(current_user, 'id')  # type: int
     if ticket_user_id != current_user_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You can only delete your own tickets.")
-    crud.delete_ticket(db, ticket)
+    crud.delete_ticket(db, ticket, int(current_user.id)) # type: ignore
 
 
 # ------------------------------------------------------------- Comments ----

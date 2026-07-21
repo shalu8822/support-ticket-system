@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Any, Dict
 from pydantic import BaseModel, EmailStr, ConfigDict, field_validator
 
 from models import RoleEnum, PriorityEnum, StatusEnum
@@ -88,6 +88,14 @@ class TicketOut(BaseModel):
     customer_name: Optional[str] = None
     agent_name: Optional[str] = None
 
+
+class AuditLogResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    action: str
+    changes: Optional[Dict[str, Any]]
+    performed_by: int
+    timestamp: datetime
 
 # ------------------------------------------------------------- Comments ----
 class CommentCreate(BaseModel):
