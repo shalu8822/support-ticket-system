@@ -1,13 +1,15 @@
 import os
+import time
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from streamlit import status
-#from middleware import ObservabilityMiddleware
-#from logging_config import setup_logging
-#import logging
+from sqlalchemy import text
+from logging_config import logger,setup_logging
+#from exceptions import register_exception_handlers
+from middleware import RequestLoggingMiddleware
 
 from database import Base, engine, SessionLocal
 import models
@@ -18,15 +20,18 @@ from routers import tickets as tickets_router
 from routers import admin as admin_router
 
 # Initialize professional logging
-#setup_logging()
+setup_logging()
 #logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Customer Support Ticket System API",
     description="Role-based (customer / admin) support-ticket platform built with FastAPI + JWT.",
     version="1.0.0",
 )
+
+#register_exception_handlers(app)
+
 # Add our Middleware
-#app.add_middleware(ObservabilityMiddleware)
+app.add_middleware(RequestLoggingMiddleware)
 
 # CORS: in production, replace "*" with your deployed frontend's origin(s).
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
@@ -90,15 +95,50 @@ def seed_admin():
 @app.get("/debug-crash")
 def crash_me():
     return 1 / 0  # This will trigger a ZeroDivisionError
+
 @app.on_event("startup")
 def on_startup():
-    Base.metadata.create_all(bind=engine)
+    #run_migrations()
     seed_admin()
+    logger.info("Application startup complete")
 
 
 @app.get("/", tags=["Health"])
 def health_check():
+    """Liveness check — always returns ok if the process can respond at all."""
     return {"status": "ok", "service": "customer-support-ticket-system"}
+
+
+@app.get("/health", tags=["Health"])
+def deep_health_check():
+    """
+    Readiness check: actually pings the database instead of just returning
+    a static "ok". If the DB connection is down, this reports it -- so a
+    load balancer or on-call engineer finds out before a customer does.
+    """
+    checks = {"api": "ok", "database": "unknown"}
+    db_latency_ms = None
+    overall_status = "ok"
+
+    db = SessionLocal()
+    try:
+        start = time.perf_counter()
+        db.execute(text("SELECT 1"))
+        db_latency_ms = round((time.perf_counter() - start) * 1000, 2)
+        checks["database"] = "ok"
+    except Exception as exc:
+        checks["database"] = "unreachable"
+        overall_status = "degraded"
+        logger.error("Database health check failed", extra={"error": str(exc)})
+    finally:
+        db.close()
+
+    return {
+        "status": overall_status,
+        "checks": checks,
+        "database_latency_ms": db_latency_ms,
+    }
+
 
 if __name__ == "__main__":
     import uvicorn
